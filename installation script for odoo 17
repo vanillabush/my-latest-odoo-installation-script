@@ -1,0 +1,152 @@
+#!/bin/bash
+
+# Configuration Parameters
+OE_USER="odoo"
+OE_BASE_DIR="/opt/odoo-17"          # Main installation directory
+OE_PORT="8071"                      # Odoo service port
+OE_VERSION="17.0"                   # Odoo version
+OE_CONFIG="odoo-17"                 # Config/service name
+PYTHON_VERSION="3.10"               # Required Python version
+ADMIN_EMAIL="odoo@example.com"      # Admin email for SSL
+
+# Feature Toggles
+INSTALL_WKHTMLTOPDF="True"
+INSTALL_POSTGRESQL_FOURTEEN="True"
+INSTALL_NGINX="False"
+ENABLE_SSL="False"
+
+# System Configuration
+OE_HOME="/$OE_USER"
+WEBSITE_NAME="_"
+
+# ====================================================
+# Installation Script
+# ====================================================
+
+# System Preparation
+echo -e "\n---- Update System ----"
+sudo add-apt-repository universe -y
+sudo apt-get update && sudo apt-get upgrade -y
+
+# Install Python 3.10
+echo -e "\n---- Install Python $PYTHON_VERSION ----"
+sudo apt-get install software-properties-common -y
+sudo add-apt-repository ppa:deadsnakes/ppa -y
+sudo apt-get update
+sudo apt-get install python$PYTHON_VERSION python$PYTHON_VERSION-dev python$PYTHON_VERSION-venv -y
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python$PYTHON_VERSION 10
+
+# Install PostgreSQL
+echo -e "\n---- Install PostgreSQL ----"
+if [ $INSTALL_POSTGRESQL_FOURTEEN = "True" ]; then
+    sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+    sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+    sudo apt-get update
+    sudo apt-get install postgresql-14 -y
+else
+    sudo apt-get install postgresql postgresql-server-dev-all -y
+fi
+
+# Create System User
+echo -e "\n---- Create System User ----"
+sudo adduser --system --quiet --shell=/bin/bash --home=$OE_HOME --gecos 'ODOO' --group $OE_USER
+
+# Clean Installation Directory
+echo -e "\n---- Prepare Installation Directory ----"
+sudo rm -rf $OE_BASE_DIR
+sudo mkdir -p $OE_BASE_DIR/{src,venv,logs,config,custom/addons,data}
+sudo chown -R $OE_USER:$OE_USER $OE_BASE_DIR
+sudo chmod -R 775 $OE_BASE_DIR
+
+# Install System Dependencies
+echo -e "\n---- Install System Libraries ----"
+sudo apt-get install git libxml2-dev libxslt1-dev libzip-dev libldap2-dev libsasl2-dev \
+     libjpeg-dev libpq-dev libpng-dev build-essential wget node-less npm unzip gdebi \
+     libev-dev libssl-dev libffi-dev libcurl4-openssl-dev -y
+
+# Install Wkhtmltopdf
+if [ $INSTALL_WKHTMLTOPDF = "True" ]; then
+    echo -e "\n---- Install Wkhtmltopdf ----"
+    sudo wget https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb -O /tmp/wkhtmltox.deb
+    sudo gdebi --n /tmp/wkhtmltox.deb
+fi
+
+# Clone Odoo Source
+echo -e "\n---- Clone Odoo Source ----"
+sudo git clone --depth 1 --branch $OE_VERSION https://github.com/odoo/odoo.git $OE_BASE_DIR/src
+sudo chown -R $OE_USER:$OE_USER $OE_BASE_DIR/src
+
+# Create Virtual Environment
+echo -e "\n---- Create Python Virtual Environment ----"
+sudo python$PYTHON_VERSION -m venv $OE_BASE_DIR/venv
+
+# Install Python Requirements
+echo -e "\n---- Install Python Dependencies ----"
+sudo $OE_BASE_DIR/venv/bin/pip install --upgrade pip "setuptools<66.0.0" wheel
+sudo $OE_BASE_DIR/venv/bin/pip install -r $OE_BASE_DIR/src/requirements.txt \
+    --constraint "https://raw.githubusercontent.com/odoo/odoo/$OE_VERSION/requirements.txt" \
+    --no-cache-dir \
+    --force-reinstall
+
+# Install Node.js and rtlcss
+echo -e "\n---- Install Node.js ----"
+sudo npm install -g rtlcss
+
+# Generate Configuration File
+echo -e "\n---- Create Configuration File ----"
+cat <<EOF | sudo tee $OE_BASE_DIR/config/odoo.conf > /dev/null
+[options]
+admin_passwd = $(openssl rand -base64 24)
+http_port = $OE_PORT
+logfile = $OE_BASE_DIR/logs/odoo.log
+addons_path = $OE_BASE_DIR/src/addons,$OE_BASE_DIR/custom/addons
+data_dir = $OE_BASE_DIR/data
+db_host = localhost
+db_user = $OE_USER
+db_password = False
+EOF
+
+sudo chown $OE_USER:$OE_USER $OE_BASE_DIR/config/odoo.conf
+sudo chmod 640 $OE_BASE_DIR/config/odoo.conf
+
+# Create Systemd Service
+echo -e "\n---- Create Systemd Service ----"
+cat <<EOF | sudo tee /etc/systemd/system/$OE_CONFIG.service > /dev/null
+[Unit]
+Description=Odoo 17 Service
+Requires=postgresql.service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=$OE_USER
+Group=$OE_USER
+ExecStart=$OE_BASE_DIR/venv/bin/python3 $OE_BASE_DIR/src/odoo-bin -c $OE_BASE_DIR/config/odoo.conf
+WorkingDirectory=$OE_BASE_DIR/src
+Restart=on-failure
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and Start Service
+echo -e "\n---- Start Odoo Service ----"
+sudo systemctl daemon-reload
+sudo systemctl enable $OE_CONFIG
+sudo systemctl start $OE_CONFIG
+
+# Final Output
+echo -e "\n\033[1;32mInstallation Completed Successfully!\033[0m"
+echo "==============================================="
+echo "Odoo 17 Configuration:"
+echo "• Python Version: $(python3 --version)"
+echo "• Installation Directory: $OE_BASE_DIR"
+echo "• Service Name: $OE_CONFIG"
+echo "• Running Port: $OE_PORT"
+echo "• Config File: $OE_BASE_DIR/config/odoo.conf"
+echo "• Logs Directory: $OE_BASE_DIR/logs/"
+echo "• Virtual Environment: $OE_BASE_DIR/venv"
+echo "• Manage Service: sudo systemctl {start|stop|restart} $OE_CONFIG"
+echo "==============================================="
